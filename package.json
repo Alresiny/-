@@ -1,52 +1,127 @@
-{
-  "name": "theme-raed",
-  "version": "1.0.3",
-  "description": "Salla Theme",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/SallaApp/theme-raed.git"
-  },
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "production": "webpack --mode production",
-    "prod": "webpack --mode production",
-    "development": "webpack --mode development",
-    "watch": "webpack --mode development --watch"
-  },
-  "author": "Salla",
-  "dependencies": {
-    "@salla.sa/twilight": "^2.14.35",
-    "@salla.sa/twilight-tailwind-theme": "^2.14.35",
-    "animejs": "^3.2.1",
-    "fslightbox": "^3.3.0-2",
-    "lite-youtube-embed": "^0.2.0",
-    "mmenu-light": "^3.0.9",
-    "sweetalert2": "^11.3.3"
-  },
-  "devDependencies": {
-    "@babel/core": "^7.16.0",
-    "@babel/plugin-transform-runtime": "^7.18.6",
-    "@babel/preset-env": "^7.16.5",
-    "@salla.sa/twilight-components": "^2.14.49",
-    "@tailwindcss/forms": "^0.5.2",
-    "@tailwindcss/line-clamp": "^0.4.0",
-    "@tailwindcss/nesting": "^0.0.0-insiders.565cd3e",
-    "autoprefixer": "^10.4.7",
-    "babel-loader": "^9.1.2",
-    "babel-loader-exclude-node-modules-except": "^1.2.1",
-    "copy-webpack-plugin": "^11.0.0",
-    "css-loader": "^6.5.0",
-    "glob": "^10.3.1",
-    "mini-css-extract-plugin": "^2.4.3",
-    "postcss": "^8.4.14",
-    "postcss-import": "^15.1.0",
-    "postcss-loader": "^7.0.0",
-    "postcss-preset-env": "^8.0.1",
-    "sass": "^1.43.4",
-    "sass-loader": "^13.2.0",
-    "tailwindcss": "^3.3.3",
-    "webpack": "^5.64.1",
-    "webpack-cli": "^5.0.1"
+├── client/            # React frontend
+│   ├── src/
+│   │   ├── components/  # Reusable UI components
+│   │   ├── pages/       # Page layouts (Home, Product, Cart)
+│   │   └── store/       # Redux state management
+├── server/            # Node.js backend
+│   ├── controllers/   # API logic
+│   ├── middleware/    # Auth, rate-limiting
+│   └── prisma/        # Database schema
+├── docker-compose.yml # Container orchestration
+└── .env               # Environment variables// client/src/components/ProductGrid.jsx
+import React from 'react';
+import { useSelector } from 'react-redux';
+const ProductGrid = () => {
+  const { products, loading } = useSelector((state) => state.products);
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {products.map((product) => (
+        <div key={product.id} className="border p-4 rounded-lg">
+          <img src={product.image} alt={product.name} className="h-48 w-full object-cover" />
+          <h3 className="font-bold mt-2">{product.name}</h3>
+          <p>${product.price}</p>
+          <button className="bg-blue-500 text-white px-4 py-2 mt-2 rounded">
+            Add to Cart
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+};// server/middleware/auth.js
+const jwt = require('jsonwebtoken');
+
+const authenticate = (req, res, next) => {
+  const token = req.header('Authorization')?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Access denied' });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded; // Attach user to the request
+    next();
+  } catch (err) {
+    res.status(400).json({ error: 'Invalid token' });
   }
+};
+
+module.exports = authenticate;// server/controllers/paymentController.js
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+exports.createPaymentIntent = async (req, res) => {
+  const { amount, currency = 'usd' } = req.body;
+
+  try {
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amount * 100, // Convert dollars to cents
+      currency,
+    });
+
+    res.json({ clientSecret: paymentIntent.client_secret });
+  } catch (err) {
+    res.status(500).json({ error: 'Payment failed' });
+  }
+};// server/prisma/schema.prisma
+model Product {
+  id          Int      @id @default(autoincrement())
+  name        String
+  price       Float
+  description String?
+  image       String
+  stock       Int      @default(0)
 }
+
+model User {
+  id       Int     @id @default(autoincrement())
+  email    String  @unique
+  password String  // Hashed password
+  cart     Cart[]
+}
+
+model Cart {
+  id        Int     @id @default(autoincrement())
+  user      User    @relation(fields: [userId], references: [id])
+  userId    Int
+  product   Product @relation(fields: [productId], references: [id])
+  productId Int
+  quantity  Int     @default(1)
+}// server/middleware/cache.js
+const redis = require('redis');
+const client = redis.createClient();
+
+const cache = (req, res, next) => {
+  const key = req.originalUrl;
+  client.get(key, (err, data) => {
+    if (data) {
+      res.json(JSON.parse(data));
+    } else {
+      res.sendResponse = res.json;
+      res.json = (body) => {
+        client.setex(key, 3600, JSON.stringify(body)); // Cache for 1 hour
+        res.sendResponse(body);
+      };
+      next();
+    }
+  });
+};
+
+module.exports = cache;# Dockerfile for Node.js backend
+FROM node:18-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+COPY . .
+EXPOSE 3000
+CMD ["node", "server.js"]# docker-compose.yml
+version: '3'
+services:
+  backend:
+    build: ./server
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgres://user:pass@db:5432/mydb
+  db:
+    image: postgres:14
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+volumes:
+  postgres-data:
